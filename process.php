@@ -1,60 +1,73 @@
 <?php
-header('Content-Type: application/json');
+
+declare(strict_types=1);
+
+require_once __DIR__ . '/lib/HashGenerator.php';
+
+use Passhas\Security\HashGenerator;
+
+header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+
+$generator = new HashGenerator();
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    respond([
+        'success' => true,
+        'algorithms' => HashGenerator::availableAlgorithms(),
+        'phpVersion' => PHP_VERSION,
+    ]);
+}
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['error' => 'Método não permitido']);
-    exit;
+    respond(['success' => false, 'error' => 'Método não permitido.'], 405);
 }
 
-$data = json_decode(file_get_contents('php://input'), true);
+$payload = json_decode((string) file_get_contents('php://input'), true);
+$payload = is_array($payload) ? $payload : $_POST;
 
-if (!isset($data['password']) || trim($data['password']) === '') {
-    http_response_code(400);
-    echo json_encode(['error' => 'Password é obrigatório']);
-    exit;
+$password = $payload['password'] ?? '';
+$password = is_string($password) ? $password : '';
+
+if (trim($password) === '') {
+    respond(['success' => false, 'error' => 'Escreva uma palavra-passe para continuar.'], 422);
 }
 
-$password = $data['password'];
-$algorithm = $data['algorithm'] ?? 'bcrypt';
-
-switch ($algorithm) {
-    case 'bcrypt':
-        $hash = password_hash($password, PASSWORD_BCRYPT);
-        $algoName = 'BCRYPT';
-        break;
-    case 'argon2i':
-        if (defined('PASSWORD_ARGON2I')) {
-            $hash = password_hash($password, PASSWORD_ARGON2I);
-            $algoName = 'ARGON2I';
-        } else {
-            echo json_encode(['error' => 'ARGON2I não disponível nesta versão do PHP']);
-            exit;
-        }
-        break;
-    case 'argon2id':
-        if (defined('PASSWORD_ARGON2ID')) {
-            $hash = password_hash($password, PASSWORD_ARGON2ID);
-            $algoName = 'ARGON2ID';
-        } else {
-            echo json_encode(['error' => 'ARGON2ID não disponível nesta versão do PHP']);
-            exit;
-        }
-        break;
-    default:
-        $hash = password_hash($password, PASSWORD_DEFAULT);
-        $algoName = 'DEFAULT';
-        break;
+if (mb_strlen($password) > HashGenerator::MAX_PASSWORD_LENGTH) {
+    respond([
+        'success' => false,
+        'error' => sprintf(
+            'A palavra-passe pode ter no máximo %d caracteres.',
+            HashGenerator::MAX_PASSWORD_LENGTH
+        ),
+    ], 422);
 }
 
-// Get hash info
-$info = password_hash_info($hash) ?? [];
+$algorithm = $payload['algorithm'] ?? 'bcrypt';
+$algorithm = is_string($algorithm) ? $algorithm : 'bcrypt';
 
-echo json_encode([
+try {
+    $result = $generator->generate($password, $algorithm);
+} catch (\InvalidArgumentException $exception) {
+    respond(['success' => false, 'error' => $exception->getMessage()], 422);
+} catch (\Throwable $exception) {
+    respond(['success' => false, 'error' => 'O servidor não conseguiu gerar o hash.'], 500);
+}
+
+respond([
     'success' => true,
-    'hash' => $hash,
-    'algorithm' => $algoName,
-    'length' => strlen($hash),
-    'verify' => password_verify($password, $hash),
-    'php_version' => PHP_VERSION
+    'phpVersion' => PHP_VERSION,
+    ...$result,
 ]);
+
+/**
+ * Emits a JSON response and stops the request.
+ *
+ * @param array<string, mixed> $body
+ */
+function respond(array $body, int $status = 200): never
+{
+    http_response_code($status);
+    echo json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
